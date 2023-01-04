@@ -1,11 +1,13 @@
 from bs4 import BeautifulSoup
+import boto3
 import requests
 from pprint import pprint
+from datetime import datetime, timedelta
+import json
 
 geno_par = {
     "DWG": "https://www.dwg-online.de/angebote/aktuelle-wohnungsangebote",
     "BWB": "https://www.bwb-eg.de/wohnungssuche",
-    "DUEBS": "https://www.duebs.de/mietangebote",
     "WOGEDO": "https://www.wogedo.de/wohnen/aktuelle-angebote/",
     "SWD": "https://www.swd-duesseldorf.de/service/wohnungsangebot/wohnungssuche/wohnungssuche.html?FORM_SUBMIT=&regionid=0&rooms=0&area=0&flatfilter_submit=Suchen"
 }
@@ -55,8 +57,6 @@ def bwb_scraper():
 
 
 
-
-
 def wogedo_scaper():
     soup = BeautifulSoup(html_text(geno_par['WOGEDO']), 'html.parser')
     departements = soup.find_all("article", {"class": "wg-offer-articles__items flat wg-bg--white"})
@@ -72,3 +72,57 @@ def swd_scraper():
     url = ["https://www.swd-duesseldorf.de/"+x.find('a', href=True)['href'] for x in departements]
 
     return url
+
+def s3_client():
+    s3 = boto3.client('s3')
+    return s3
+
+def s3_upload(s3, bucket, key, body):
+    body = str(body).encode('utf-8')
+    s3.put_object(Bucket=bucket, Key=key, Body=body)
+
+
+if __name__ == '__main__':
+    geno_scraper = {
+        "DWG": dwg_scraper,
+        "BWB": bwb_scraper,
+        "WOGEDO": wogedo_scaper,
+        "SWD": swd_scraper
+
+    }
+    yesterday = (datetime.today() - timedelta(days=0)).strftime('%Y-%m-%d') # set to -1 after testing
+    today = datetime.today().strftime('%Y-%m-%d')
+    s3 = s3_client()
+
+    # Get all data from yesterday
+    try:
+        last_timestamp_data = {
+            "DWG": s3.get_object(Bucket='geno-scraper-s3', Key=f'{yesterday}/DWG.txt')['Body'].read().decode('utf-8'),
+            "BWB": s3.get_object(Bucket='geno-scraper-s3', Key=f'{yesterday}/BWB.txt')['Body'].read().decode('utf-8'),
+            "WOGEDO": s3.get_object(Bucket='geno-scraper-s3', Key=f'{yesterday}/WOGEDO.txt')['Body'].read().decode('utf-8'),
+            "SWD": s3.get_object(Bucket='geno-scraper-s3', Key=f'{yesterday}/SWD.txt')['Body'].read().decode('utf-8')
+        }
+    except:
+        print('loading yesterday data failed')
+
+    # Add all new entries to the list
+    new_entries = []
+    
+    # TODO: Having multiple scrapings each day
+    # Scraping each geno and uploading to s3
+    for geno_name, geno_url in geno_par.items():
+        try:
+            print(f'Scraping {geno_name}...')
+            body = geno_scraper[geno_name]()
+            try:
+                new_entries.append(list(set(body) - set(json.loads(last_timestamp_data[geno_name].replace("'", '"')))))
+            except:
+                print('No data to compare with from yesterday')
+            s3_upload(s3, 'geno-scraper-s3', f'{today}/{geno_name}.txt', body)
+        except:
+            print(f'Error scraping {geno_name}')
+
+    print(new_entries)
+
+    print('finished scraping')
+
