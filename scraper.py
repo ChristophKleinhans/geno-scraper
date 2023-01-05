@@ -1,9 +1,11 @@
 from bs4 import BeautifulSoup
 import boto3
 import requests
-from pprint import pprint
+import pprint
 from datetime import datetime, timedelta
 import json
+import logging
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 geno_par = {
     "DWG": "https://www.dwg-online.de/angebote/aktuelle-wohnungsangebote",
@@ -15,9 +17,8 @@ geno_par = {
 def html_text(url):
     try: 
         html = requests.get(url)
-        print(html)
     except:
-        print(f'Cant get url for {geno_name}')
+        logging.warning(f'Cant get url for {geno_name}')
 
     return html.text
 
@@ -83,6 +84,7 @@ def s3_upload(s3, bucket, key, body):
 
 
 if __name__ == '__main__':
+
     geno_scraper = {
         "DWG": dwg_scraper,
         "BWB": bwb_scraper,
@@ -90,7 +92,7 @@ if __name__ == '__main__':
         "SWD": swd_scraper
 
     }
-    yesterday = (datetime.today() - timedelta(days=0)).strftime('%Y-%m-%d') # set to -1 after testing
+    yesterday = (datetime.today() - timedelta(days=1)).strftime('%Y-%m-%d')
     today = datetime.today().strftime('%Y-%m-%d')
     s3 = s3_client()
 
@@ -103,7 +105,7 @@ if __name__ == '__main__':
             "SWD": s3.get_object(Bucket='geno-scraper-s3', Key=f'{yesterday}/SWD.txt')['Body'].read().decode('utf-8')
         }
     except:
-        print('loading yesterday data failed')
+        logging.warning('loading yesterday data failed')
 
     # Add all new entries to the list
     new_entries = []
@@ -112,17 +114,24 @@ if __name__ == '__main__':
     # Scraping each geno and uploading to s3
     for geno_name, geno_url in geno_par.items():
         try:
-            print(f'Scraping {geno_name}...')
+            logging.info(f'Scraping {geno_name}...')
             body = geno_scraper[geno_name]()
             try:
                 new_entries.append(list(set(body) - set(json.loads(last_timestamp_data[geno_name].replace("'", '"')))))
             except:
-                print('No data to compare with from yesterday')
+                logging.warning('No data to compare with from yesterday')
             s3_upload(s3, 'geno-scraper-s3', f'{today}/{geno_name}.txt', body)
         except:
-            print(f'Error scraping {geno_name}')
+            logging.warning(f'Error scraping {geno_name}')
 
-    print(new_entries)
+    # publish data to sns per email
+    result_list = sum(new_entries, [])
+    message = f"Am {today} wurden folgende {len(result_list)} Einträge gefunden:\n {pprint.pformat(result_list)} "
 
-    print('finished scraping')
+    sns = boto3.client('sns')
+    response = sns.publish(TopicArn='arn:aws:sns:eu-central-1:058970924506:geno-scraper-sns', Message=message, Subject=f'Genossenschaft Scraping am {today}')
+
+    logging.info('the following message was published to SNS: \n' + message )
+
+    logging.info('finished scraping')
 
